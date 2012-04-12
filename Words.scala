@@ -4,7 +4,32 @@ import scala.io.Source
 
 object Words {
 
-  private val WordLength = 4
+  private val ValidWordLength = 4
+
+  private lazy val dictionary: Map[String, Iterable[String]] = loadDictionary
+
+  private def loadDictionary: Map[String, Iterable[String]] = {
+
+    var startTime = System.currentTimeMillis()
+
+    val dict = Source.fromFile("/usr/share/dict/words")
+    val words = dict.getLines().filter(_.length == ValidWordLength).map(_.toLowerCase).toIterable
+
+    println("Dictionary (" + words.size + " words) loaded in: " + (System.currentTimeMillis() - startTime).abs + "ms")
+
+    startTime = System.currentTimeMillis()
+
+    val resultMap = words.par.map {
+      word =>
+        word -> words.filter(areNeighbours(word, _)).seq.toIterable
+    }.seq.toMap
+
+    println("Map (" + resultMap.size + " words) built in: " + (System.currentTimeMillis() - startTime).abs + "ms")
+
+    dict.close()
+
+    resultMap
+  }
 
   def areNeighbours(word1: String, word2: String): Boolean = {
     var difference = 0
@@ -18,31 +43,6 @@ object Words {
     difference == 1
   }
 
-  private def loadDictionary: Map[String, Iterable[String]] = {
-
-    var startTime = System.currentTimeMillis()
-
-    val dict = Source.fromFile("/usr/share/dict/words")
-    val words = dict.getLines().filter(_.length == WordLength).map(_.toLowerCase).toSet.toIterable
-
-    println("Dictionary (" + words.size + " words) loaded in: " + (System.currentTimeMillis() - startTime).abs + "ms")
-
-    startTime = System.currentTimeMillis()
-
-    val resultMap = words.map {
-      word =>
-        word -> words.filter(areNeighbours(word, _))
-    }.toMap
-
-    println("Map (" + resultMap.size + " words) built in: " + (System.currentTimeMillis() - startTime).abs + "ms")
-
-    dict.close()
-
-    resultMap
-  }
-
-  private lazy val dictionary: Map[String, Iterable[String]] = loadDictionary
-
   def main(args: Array[String]) {
     if (args.size == 0 || args.size > 2) {
       println("You must supply either a file name, or a start and end word")
@@ -51,64 +51,39 @@ object Words {
 
     if (args.size == 1) {
       val source = Source.fromFile(args(0))
-      val puzzles = source.getLines()
-
-      puzzles.foreach {
-        puzzle =>
-          val words = puzzle.split(" ")
-          if (validPuzzle(words)) {
-            constructPath(words(0).toLowerCase, words(1).toLowerCase).map(println(_)).getOrElse {
-              println("Path not found")
-            }
-            constructPath(words(0).toLowerCase, words(1).toLowerCase).map(println(_)).getOrElse {
-              println("Path not found")
-            }
-            constructPath(words(0).toLowerCase, words(1).toLowerCase).map(println(_)).getOrElse {
-              println("Path not found")
-            }
-          } else {
-            println("Skipping invalid puzzle: " + puzzle)
-          }
-      }
-
+      // Save the puzzles as a Vector so that when they are parallelized they keep their order
+      val puzzles = Vector[String](source.getLines().toSeq: _*)
       source.close()
+
+      // Find the solution for each puzzle
+      val solutions = puzzles.par.map(_.split("\t")).filter(validPuzzle(_)).map {
+        words =>
+          constructPath(words(0).toLowerCase, words(1).toLowerCase).getOrElse("")
+      }.seq
+
+      val out = new java.io.FileWriter("results.txt")
+      solutions.foreach(solution => out.write(solution + "\n"))
+      out.close()
     } else {
       if (validPuzzle(args)) {
         constructPath(args(0).toLowerCase, args(1).toLowerCase).map(println(_)).getOrElse {
           println("Path not found")
         }
-      } else {
-        println("Puzzle is invalid")
       }
     }
   }
 
-  def validPuzzle(words: Array[String]): Boolean = words.filter(_.size == 4).size == 2
-
+  // Build a path, if one exists, between two words
   def constructPath(startWord: String, endWord: String): Option[String] = {
-
-    println("Constructing a path from " + startWord + " to " + endWord)
-
-    val startTime = System.currentTimeMillis()
-
     val endNode = checkLevel(Seq(new Node(None, startWord)), endWord, HashSet.empty[String])
-
-    println("Finished searching in: " + (System.currentTimeMillis() - startTime).abs + "ms")
-
     endNode.map(buildPathFromEndNode(_))
   }
 
-  def buildPathFromEndNode(endNode: Node) = {
-    new NodeIterable(endNode).toList.map(_.data).reverse.foldLeft("") {
-      (tmp: String, elem: String) => tmp + " -> " + elem
-    }
-  }
-
+  // Checks a given level of nodes to see if the wordToFind is present. If it isn't, move onto the next level
   @tailrec
   def checkLevel(nodes: Iterable[Node], wordToFind: String, alreadyChecked: Set[String]): Option[Node] = {
     nodes.find(_.data == wordToFind) match {
-      case Some(node) =>
-        Some(node)
+      case n@Some(node) => n
       case _ =>
         val nextLevel = getChildNodes(nodes, alreadyChecked)
         if (nextLevel.isEmpty) {
@@ -119,17 +94,32 @@ object Words {
     }
   }
 
+  // Finds all children of the given nodes, ignoring ones that have already been checked as part of this puzzle
   def getChildNodes(nodes: Iterable[Node], alreadyChecked: Set[String]) = {
     val childNodes = new HashSet[Node]()
     nodes.foreach {
-      node => dictionary.get(node.data).get.filterNot(alreadyChecked.contains(_)).foreach {
+      node => dictionary.get(node.data).map(_.filterNot(alreadyChecked.contains(_)).foreach {
         neighbour =>
           alreadyChecked.add(neighbour)
           childNodes.add(new Node(Some(node), neighbour))
-      }
+      })
     }
 
     childNodes
+  }
+
+  // A valid puzzle is one where both words are in the dictionary and have the correct size
+  def validPuzzle(words: Array[String]): Boolean = {
+    val result = words.filter(word => word.size == ValidWordLength && dictionary.contains(word)).size == 2
+    if (!result) {
+      println("Puzzle '" + words.mkString("-") + "' is invalid")
+    }
+    result
+  }
+
+  // Walk the node path back from the end node
+  def buildPathFromEndNode(endNode: Node) = {
+    new NodeIterable(endNode).toList.map(_.data).reverse.mkString(" -> ")
   }
 }
 
